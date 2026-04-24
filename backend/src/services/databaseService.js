@@ -63,8 +63,8 @@ class DatabaseService {
 
       await client.query(`
         ALTER TABLE track_history
-          ADD COLUMN IF NOT EXISTS last_played_at TIMESTAMP,
-          DROP COLUMN IF EXISTS last_played_on_az;
+          ADD COLUMN IF NOT EXISTS last_played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          ALTER COLUMN last_played_at SET DEFAULT CURRENT_TIMESTAMP;
       `);
 
       // Create indexes for better performance

@@ -182,8 +182,8 @@ describe('databaseService baseline behavior', () => {
 
     const allSql = client.query.mock.calls.map(call => call[0]).join('\n');
     expect(allSql).toContain('last_played_at TIMESTAMP');
-    expect(allSql).toContain('ADD COLUMN IF NOT EXISTS last_played_at TIMESTAMP');
-    expect(allSql).toContain('DROP COLUMN IF EXISTS last_played_on_az');
+    expect(allSql).toContain('ADD COLUMN IF NOT EXISTS last_played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+    expect(allSql).toContain('ALTER COLUMN last_played_at SET DEFAULT CURRENT_TIMESTAMP');
     expect(allSql).toContain('idx_track_history_autoplay_daily');
     expect(allSql).toContain('track_history(banned, last_played_at)');
     expect(client.release).toHaveBeenCalled();
