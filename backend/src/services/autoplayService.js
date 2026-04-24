@@ -11,13 +11,15 @@ function getTrackValue(track, camelName, lowerName) {
 
 async function logAndPlayTrack(track, playTrack, databaseService, messagePrefix) {
   await playTrack(getTrackValue(track, 'trackId', 'trackid'));
-  await databaseService.logPlaybackEvent({
-    trackId: getTrackValue(track, 'trackId', 'trackid'),
-    trackName: getTrackValue(track, 'trackName', 'trackname'),
-    artistName: getTrackValue(track, 'artistName', 'artistname'),
-    albumName: getTrackValue(track, 'albumName', 'albumname'),
-    userId: getTrackValue(track, 'userId', 'userid')
-  });
+  if (!getTrackValue(track, 'skipHistory', 'skiphistory')) {
+    await databaseService.logPlaybackEvent({
+      trackId: getTrackValue(track, 'trackId', 'trackid'),
+      trackName: getTrackValue(track, 'trackName', 'trackname'),
+      artistName: getTrackValue(track, 'artistName', 'artistname'),
+      albumName: getTrackValue(track, 'albumName', 'albumname'),
+      userId: getTrackValue(track, 'userId', 'userid')
+    });
+  }
   logger.info(`${messagePrefix}: ${getTrackValue(track, 'trackName', 'trackname')} by ${getTrackValue(track, 'artistName', 'artistname')}`);
 }
 

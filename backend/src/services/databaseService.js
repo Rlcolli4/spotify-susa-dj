@@ -86,7 +86,8 @@ class DatabaseService {
             duration integer,
             user_id text COLLATE pg_catalog."default" NOT NULL,
             added_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-            play_order integer NOT NULL DEFAULT 1
+            play_order integer NOT NULL DEFAULT 1,
+            skip_history boolean NOT NULL DEFAULT false
         )
 
         TABLESPACE pg_default;
@@ -108,6 +109,11 @@ class DatabaseService {
         )
 
         TABLESPACE pg_default;
+      `);
+
+      await client.query(`
+        ALTER TABLE public.playback_queue
+          ADD COLUMN IF NOT EXISTS skip_history boolean NOT NULL DEFAULT false;
       `);
 
       await client.query(`
@@ -360,7 +366,8 @@ class DatabaseService {
       const query = `
         SELECT track_id as trackId, track_name as trackName, artist_name as artistName, 
           album_name as albumName, album_art as albumArt, duration,
-          user_id as userId, added_at as dateAdded, play_order as order
+          user_id as userId, added_at as dateAdded, play_order as order,
+          skip_history as skipHistory
         FROM public.playback_queue
         ORDER BY play_order ASC
       `;
@@ -374,7 +381,7 @@ class DatabaseService {
     }
   }
 
-  async addToPlaybackQueue(trackId, trackName, artistName, albumName, albumArt, duration, userId) {
+  async addToPlaybackQueue(trackId, trackName, artistName, albumName, albumArt, duration, userId, skipHistory = false) {
     try {
       const orderQuery = `
         SELECT COALESCE(MAX(play_order), 0) + 1 AS next_order
@@ -384,10 +391,10 @@ class DatabaseService {
       const nextOrder = orderResult.rows[0].next_order;
       const insertQuery = `
         INSERT INTO public.playback_queue 
-        (track_id, track_name, artist_name, album_name, album_art, duration, user_id, play_order)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (track_id, track_name, artist_name, album_name, album_art, duration, user_id, play_order, skip_history)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       `;
-      const values = [trackId, trackName, artistName, albumName, albumArt, duration, userId, nextOrder];
+      const values = [trackId, trackName, artistName, albumName, albumArt, duration, userId, nextOrder, Boolean(skipHistory)];
       await this.pool.query(insertQuery, values);
       logger.info(`Track added to playback queue: ${trackName} by ${artistName}`);
     }

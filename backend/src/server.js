@@ -94,10 +94,11 @@ app.post('/api/queue', async (req, res) => {
       songToAdd.albumName,
       songToAdd.albumArt,
       songToAdd.duration,
-      songToAdd.userId || ''
+      songToAdd.userId || '',
+      Boolean(songToAdd.skipHistory)
     );
     const trackQueue = await databaseService.getCurrentPlaybackQueue();
-    queue = trackQueue;
+    activeQueue = trackQueue;
     res.json(trackQueue);
   } catch (error) {
     logger.error('Failed to add to song queue:', error);

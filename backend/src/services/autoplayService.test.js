@@ -131,4 +131,27 @@ describe('autoplayService', () => {
     });
     expect(deps.databaseService.removeFromPlaybackQueue).toHaveBeenCalledWith('track-2');
   });
+
+  test('manual queued add once playback skips history logging and removes the queue item', async () => {
+    const deps = createDeps({
+      status: 'play',
+      queue: [{
+        trackid: 'track-3',
+        trackname: 'Queued Once',
+        artistname: 'Queued Artist',
+        albumname: 'Queued Album',
+        userid: 'bob',
+        skiphistory: true
+      }]
+    });
+
+    await runAutoplayTick({
+      ...deps,
+      now: new Date('2026-04-24T18:00:00.000Z')
+    });
+
+    expect(deps.playTrack).toHaveBeenCalledWith('track-3');
+    expect(deps.databaseService.logPlaybackEvent).not.toHaveBeenCalled();
+    expect(deps.databaseService.removeFromPlaybackQueue).toHaveBeenCalledWith('track-3');
+  });
 });

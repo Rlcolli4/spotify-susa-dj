@@ -45,6 +45,7 @@ describe('App baseline behavior', () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
+    window.localStorage.clear();
     container = document.createElement('div');
     document.body.appendChild(container);
     fetchMock = jest.fn((url: string, options?: RequestInit) => {
@@ -59,6 +60,7 @@ describe('App baseline behavior', () => {
   afterEach(() => {
     ReactDOM.unmountComponentAtNode(container);
     container.remove();
+    window.localStorage.clear();
     jest.useRealTimers();
     jest.restoreAllMocks();
   });
@@ -118,6 +120,8 @@ describe('App baseline behavior', () => {
     expect(container.textContent).toContain('Song');
     expect(container.textContent).toContain('Artist');
     expect(container.textContent).toContain('Popularity: 55');
+    expect(container.textContent).toContain('Add Once');
+    expect(container.textContent).toContain('Add Song');
   });
 
   test('autoplay button updates server status with current DJ user', async () => {
@@ -216,5 +220,220 @@ describe('App baseline behavior', () => {
       })
     );
     expect(container.textContent).toContain('Song');
+  });
+
+  test('adding once while stopped starts playback without logging through analytics endpoint', async () => {
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (url.includes('/api/spotify/search')) {
+        return mockJson([
+          {
+            id: 'track-1',
+            album: 'Album',
+            name: 'Song',
+            artist: 'Artist',
+            duration: 61000,
+            album_image: 'https://image',
+            release_date: '2020-01-01',
+            popularity: 55
+          }
+        ]);
+      }
+      if (url.endsWith('/api/spotify/play')) {
+        return mockJson({ success: true });
+      }
+      if (url.endsWith('/api/status')) {
+        return mockJson({ status: 'play' });
+      }
+      if (url.endsWith('/api/analytics/logplayback')) {
+        return mockJson({ message: 'Playback event logged' });
+      }
+      if (url.endsWith('/api/queue') && !options) {
+        return mockJson({ queue: [], status: 'stop', spotify: { isPlaying: false, progressMs: 0, item: null } });
+      }
+      return mockJson({});
+    });
+
+    await act(async () => {
+      ReactDOM.render(<App />, container);
+      await flushPromises();
+    });
+
+    const input = container.querySelector('input') as HTMLInputElement;
+    act(() => {
+      setInputValue(input, 'song');
+      Simulate.change(input, { target: { value: 'song' } } as any);
+    });
+    await act(async () => {
+      Simulate.submit(container.querySelector('form') as Element);
+      await flushPromises();
+    });
+
+    const addOnceButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Add Once') as HTMLButtonElement;
+    await act(async () => {
+      Simulate.click(addOnceButton);
+      await flushPromises();
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:3001/api/spotify/play',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ uris: ['spotify:track:track-1'] })
+      })
+    );
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/api/analytics/logplayback'))).toBe(false);
+  });
+
+  test('adding once while playing queues the song with skipHistory', async () => {
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (url.includes('/api/spotify/search')) {
+        return mockJson([
+          {
+            id: 'track-2',
+            album: 'Queued Album',
+            name: 'Queued Song',
+            artist: 'Queued Artist',
+            duration: 61000,
+            album_image: 'https://image',
+            release_date: '2020-01-01',
+            popularity: 44
+          }
+        ]);
+      }
+      if (url.endsWith('/api/queue') && !options) {
+        return mockJson({
+          queue: [],
+          status: 'play',
+          spotify: {
+            isPlaying: true,
+            progressMs: 1000,
+            item: {
+              id: 'current-track',
+              name: 'Current Song',
+              duration_ms: 120000,
+              popularity: 50,
+              artists: [{ name: 'Current Artist' }],
+              album: {
+                name: 'Current Album',
+                release_date: '2020-01-01',
+                images: [{ url: 'https://current-image' }]
+              }
+            }
+          }
+        });
+      }
+      if (url.endsWith('/api/queue') && options?.method === 'POST') {
+        return mockJson([]);
+      }
+      return mockJson({});
+    });
+
+    await act(async () => {
+      ReactDOM.render(<App />, container);
+      await flushPromises();
+    });
+
+    const input = container.querySelector('input') as HTMLInputElement;
+    act(() => {
+      setInputValue(input, 'song');
+      Simulate.change(input, { target: { value: 'song' } } as any);
+    });
+    await act(async () => {
+      Simulate.submit(container.querySelector('form') as Element);
+      await flushPromises();
+    });
+
+    const addOnceButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Add Once') as HTMLButtonElement;
+    await act(async () => {
+      Simulate.click(addOnceButton);
+      await flushPromises();
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:3001/api/queue',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"skipHistory":true')
+      })
+    );
+  });
+
+  test('after hours mode causes add song to skip playback logging', async () => {
+    fetchMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (url.includes('/api/spotify/search')) {
+        return mockJson([
+          {
+            id: 'track-1',
+            album: 'Album',
+            name: 'Song',
+            artist: 'Artist',
+            duration: 61000,
+            album_image: 'https://image',
+            release_date: '2020-01-01',
+            popularity: 55
+          }
+        ]);
+      }
+      if (url.endsWith('/api/spotify/play')) {
+        return mockJson({ success: true });
+      }
+      if (url.endsWith('/api/status')) {
+        return mockJson({ status: 'play' });
+      }
+      if (url.endsWith('/api/analytics/logplayback')) {
+        return mockJson({ message: 'Playback event logged' });
+      }
+      if (url.endsWith('/api/queue') && !options) {
+        return mockJson({ queue: [], status: 'stop', spotify: { isPlaying: false, progressMs: 0, item: null } });
+      }
+      return mockJson({});
+    });
+
+    await act(async () => {
+      ReactDOM.render(<App />, container);
+      await flushPromises();
+    });
+
+    const afterHoursButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'After Hours') as HTMLButtonElement;
+    act(() => {
+      Simulate.click(afterHoursButton);
+    });
+
+    const input = container.querySelector('input') as HTMLInputElement;
+    act(() => {
+      setInputValue(input, 'song');
+      Simulate.change(input, { target: { value: 'song' } } as any);
+    });
+    await act(async () => {
+      Simulate.submit(container.querySelector('form') as Element);
+      await flushPromises();
+    });
+
+    const addSongButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Add Song') as HTMLButtonElement;
+    await act(async () => {
+      Simulate.click(addSongButton);
+      await flushPromises();
+    });
+
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/api/analytics/logplayback'))).toBe(false);
+    expect(JSON.parse(window.localStorage.getItem('djbot-after-hours-mode') || '{}')).toEqual(
+      expect.objectContaining({ enabled: true })
+    );
+  });
+
+  test('expired after hours mode is ignored and removed from local storage', async () => {
+    window.localStorage.setItem('djbot-after-hours-mode', JSON.stringify({
+      enabled: true,
+      expiresAt: '2000-01-01T00:00:00.000Z'
+    }));
+
+    await act(async () => {
+      ReactDOM.render(<App />, container);
+      await flushPromises();
+    });
+
+    const afterHoursButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'After Hours') as HTMLButtonElement;
+    expect(afterHoursButton.getAttribute('aria-pressed')).toBe('false');
+    expect(window.localStorage.getItem('djbot-after-hours-mode')).toBeNull();
   });
 });

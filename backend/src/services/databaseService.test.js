@@ -132,6 +132,7 @@ describe('databaseService baseline behavior', () => {
     await databaseService.clearPlaybackQueue();
 
     expect(databaseService.pool.query.mock.calls[1][0]).toContain('INSERT INTO public.playback_queue');
+    expect(databaseService.pool.query.mock.calls[1][0]).toContain('skip_history');
     expect(databaseService.pool.query.mock.calls[1][1]).toEqual([
       'track-1',
       'Song',
@@ -140,11 +141,33 @@ describe('databaseService baseline behavior', () => {
       'art.jpg',
       123,
       'alice',
-      7
+      7,
+      false
     ]);
+    expect(databaseService.pool.query.mock.calls[2][0]).toContain('skip_history as skipHistory');
     expect(databaseService.pool.query.mock.calls[2][0]).toContain('ORDER BY play_order ASC');
     expect(databaseService.pool.query.mock.calls[3][0]).toContain('DELETE FROM public.playback_queue');
     expect(databaseService.pool.query.mock.calls[4][0]).toContain('TRUNCATE public.playback_queue');
+  });
+
+  test('queue helper persists skip history flag for add once tracks', async () => {
+    databaseService.pool.query
+      .mockResolvedValueOnce({ rows: [{ next_order: 3 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await databaseService.addToPlaybackQueue('track-2', 'Song', 'Artist', 'Album', 'art.jpg', 123, 'alice', true);
+
+    expect(databaseService.pool.query.mock.calls[1][1]).toEqual([
+      'track-2',
+      'Song',
+      'Artist',
+      'Album',
+      'art.jpg',
+      123,
+      'alice',
+      3,
+      true
+    ]);
   });
 
   test('status and DJ user helpers map database rows to app values', async () => {
@@ -186,6 +209,8 @@ describe('databaseService baseline behavior', () => {
     expect(allSql).toContain('ALTER COLUMN last_played_at SET DEFAULT CURRENT_TIMESTAMP');
     expect(allSql).toContain('idx_track_history_autoplay_daily');
     expect(allSql).toContain('track_history(banned, last_played_at)');
+    expect(allSql).toContain('skip_history boolean NOT NULL DEFAULT false');
+    expect(allSql).toContain('ADD COLUMN IF NOT EXISTS skip_history boolean NOT NULL DEFAULT false');
     expect(client.release).toHaveBeenCalled();
   });
 

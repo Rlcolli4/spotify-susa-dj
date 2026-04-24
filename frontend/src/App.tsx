@@ -8,10 +8,59 @@ import { AuthProvider } from './contexts/SpotifyAuthContext';
 import { Song } from './models/Song';
 import * as utils from './utils/utilities';
 
+const AFTER_HOURS_STORAGE_KEY = 'djbot-after-hours-mode';
+
+function getNextLocalMidnight() {
+  const nextMidnight = new Date();
+  nextMidnight.setHours(24, 0, 0, 0);
+  return nextMidnight;
+}
+
+function readAfterHoursMode() {
+  try {
+    const storedMode = window.localStorage.getItem(AFTER_HOURS_STORAGE_KEY);
+    if (!storedMode) {
+      return false;
+    }
+
+    const parsedMode = JSON.parse(storedMode);
+    if (!parsedMode.enabled || !parsedMode.expiresAt || new Date(parsedMode.expiresAt).getTime() <= Date.now()) {
+      window.localStorage.removeItem(AFTER_HOURS_STORAGE_KEY);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    window.localStorage.removeItem(AFTER_HOURS_STORAGE_KEY);
+    return false;
+  }
+}
+
+function readAfterHoursExpiration() {
+  try {
+    const storedMode = window.localStorage.getItem(AFTER_HOURS_STORAGE_KEY);
+    if (!storedMode) {
+      return null;
+    }
+
+    const parsedMode = JSON.parse(storedMode);
+    if (!parsedMode.enabled || !parsedMode.expiresAt || new Date(parsedMode.expiresAt).getTime() <= Date.now()) {
+      window.localStorage.removeItem(AFTER_HOURS_STORAGE_KEY);
+      return null;
+    }
+
+    return parsedMode.expiresAt;
+  } catch (error) {
+    window.localStorage.removeItem(AFTER_HOURS_STORAGE_KEY);
+    return null;
+  }
+}
+
 function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isPlaying, setIsPlaying] = useState(false);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
+  const [isAfterHoursMode, setIsAfterHoursMode] = useState(readAfterHoursMode);
   const [searchResults, setSearchResults] = useState<Song[]>([]);
 
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
@@ -195,6 +244,7 @@ function App() {
               duration: track.durationms || 0,
               albumArt: track.albumart || '',
               userId: track.userid || '',
+              skipHistory: track.skiphistory || track.skipHistory || false,
             }));
 
             setUpcomingSongs(songs)
@@ -249,40 +299,77 @@ function App() {
     };
   }, [fetchPlaybackState]);
 
-  const handleAddSong = async (song: Song) => {
+  useEffect(() => {
+    if (!isAfterHoursMode) {
+      return;
+    }
+
+    const expiresAt = readAfterHoursExpiration();
+    if (!expiresAt) {
+      setIsAfterHoursMode(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      window.localStorage.removeItem(AFTER_HOURS_STORAGE_KEY);
+      setIsAfterHoursMode(false);
+    }, Math.max(new Date(expiresAt).getTime() - Date.now(), 0));
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isAfterHoursMode]);
+
+  const handleAfterHoursToggle = () => {
+    if (isAfterHoursMode) {
+      window.localStorage.removeItem(AFTER_HOURS_STORAGE_KEY);
+      setIsAfterHoursMode(false);
+      return;
+    }
+
+    window.localStorage.setItem(AFTER_HOURS_STORAGE_KEY, JSON.stringify({
+      enabled: true,
+      expiresAt: getNextLocalMidnight().toISOString()
+    }));
+    setIsAfterHoursMode(true);
+  };
+
+  const handleAddSong = async (song: Song, skipHistory = false) => {
     try {
-      song.userId = djUser?.username || 'local-user';
+      const songToAdd = {
+        ...song,
+        userId: djUser?.username || 'local-user',
+        skipHistory: skipHistory || isAfterHoursMode
+      };
 
       if (isAutoPlaying) {
         //just add to queue
-        const isDuplicate = upcomingSongs.some(existingSong => existingSong.songId === song.songId);
+        const isDuplicate = upcomingSongs.some(existingSong => existingSong.songId === songToAdd.songId);
         if (!isDuplicate) {
-          await addToQueue(song);
-          setUpcomingSongs(prevSongs => [...prevSongs, song]);
+          await addToQueue(songToAdd);
+          setUpcomingSongs(prevSongs => [...prevSongs, songToAdd]);
         }
 
       }
       else if (isPlaying) {
         //check to add to queue first, then just play
-        if (currentSong && currentSong.songId !== song.songId) {
-          const isDuplicate = upcomingSongs.some(existingSong => existingSong.songId === song.songId);
+        if (currentSong && currentSong.songId !== songToAdd.songId) {
+          const isDuplicate = upcomingSongs.some(existingSong => existingSong.songId === songToAdd.songId);
           if (!isDuplicate) {
-            await addToQueue(song);
-            setUpcomingSongs(prevSongs => [...prevSongs, song]);
+            await addToQueue(songToAdd);
+            setUpcomingSongs(prevSongs => [...prevSongs, songToAdd]);
           }
         }
         else {
-          updateStatus('play', djUser?.username || 'local-user');
-          callPlayAPI(song);
-          setCurrentSong(song);
+          await updateStatus('play', djUser?.username || 'local-user');
+          await callPlayAPI(songToAdd, songToAdd.skipHistory);
+          setCurrentSong(songToAdd);
           setIsPlaying(true);
         }
       }
       else { //stopped state
         //play song immediately
-        updateStatus('play', djUser?.username || 'local-user');
-        callPlayAPI(song);
-        setCurrentSong(song);
+        await updateStatus('play', djUser?.username || 'local-user');
+        await callPlayAPI(songToAdd, songToAdd.skipHistory);
+        setCurrentSong(songToAdd);
         setIsPlaying(true);
       }
     }
@@ -301,7 +388,7 @@ function App() {
     setUpcomingSongs(prevSongs => prevSongs.filter(song => song.songId !== songId));
   };
 
-  const callPlayAPI = async (song: Song) => {
+  const callPlayAPI = async (song: Song, skipHistory = false) => {
     try {
       const trackUri = `spotify:track:${song.songId}`;
       const response = await fetch(`${API_URL}/api/spotify/play`, {
@@ -317,7 +404,7 @@ function App() {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-      else {
+      else if (!skipHistory) {
         //log playback
         await fetch(`${API_URL}/api/analytics/logplayback`, {
           method: 'POST',
@@ -648,6 +735,19 @@ function App() {
                   </svg>
                   <span>Blame</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={handleAfterHoursToggle}
+                  aria-pressed={isAfterHoursMode}
+                  className={`text-white px-6 py-2 rounded-lg font-semibold transition-colors duration-200 flex items-center space-x-2
+                            ${isAfterHoursMode ? 'bg-purple-600 hover:bg-purple-700' : 'bg-gray-600 hover:bg-gray-500'}`}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 118.646 3.646 7 7 0 0020.354 15.354z" />
+                  </svg>
+                  <span>After Hours</span>
+                </button>
               </div>
             </div>
           </div>
@@ -668,9 +768,9 @@ function App() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
                   {searchResults.map((song) => (
                     <div key={song.songId} className="bg-gray-600 rounded-lg p-3 hover:bg-gray-600 transition-colors duration-200">
-                      <div className="flex flex-col sm:flex-row sm:items-center space-y-3 sm:space-y-0 sm:space-x-3">
+                      <div className="flex flex-col sm:flex-row sm:items-stretch space-y-3 sm:space-y-0 sm:space-x-3">
                         {/* Album Cover */}
-                        <div className="flex-shrink-0 flex flex-col items-center">
+                        <div className="flex-shrink-0 flex justify-center sm:justify-start">
                           {song.albumArt ? (
                             <img
                               src={song.albumArt}
@@ -684,27 +784,37 @@ function App() {
                               className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg object-cover"
                             />
                           )}
-                          <button
-                            onClick={() => handleAddSong(song)}
-                            className="w-full bg-green-600 hover:bg-green-700 text-white px-2 py-1.5 rounded text-xs transition-colors duration-200 mt-2"
-                          >
-                            Add Song
-                          </button>
                         </div>
 
                         {/* Song Info and Controls */}
-                        <div className="flex-1 min-w-0 text-center sm:text-left">
-                          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start mb-1 space-y-1 sm:space-y-0">
-                            <h3 className="font-semibold text-white truncate text-sm">{song.songName}</h3>
-                            <span className="text-xs text-gray-400 bg-gray-600 px-1 py-0.5 rounded">{utils.formatDuration(song.duration)}</span>
+                        <div className="flex-1 min-w-0 text-center sm:text-left flex flex-col justify-between">
+                          <div>
+                            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start mb-1 space-y-1 sm:space-y-0">
+                              <h3 className="font-semibold text-white truncate text-sm">{song.songName}</h3>
+                              <span className="text-xs text-gray-400 bg-gray-600 px-1 py-0.5 rounded">{utils.formatDuration(song.duration)}</span>
+                            </div>
+                            <p className="text-gray-300 text-xs mb-1">{song.artist}</p>
+                            <p className="text-gray-400 text-xs mb-2">{song.albumName}</p>
                           </div>
-                          <p className="text-gray-300 text-xs mb-1">{song.artist}</p>
-                          <p className="text-gray-400 text-xs mb-2">{song.albumName}</p>
 
-                          <div className="flex justify-center sm:justify-start">
+                          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
                             <span className="text-xs text-gray-400 bg-gray-700 px-2 py-1 rounded-full">
                               Popularity: {song.popularity}
                             </span>
+                            <div className="flex justify-center sm:justify-end gap-2">
+                              <button
+                                onClick={() => handleAddSong(song, true)}
+                                className="bg-blue-500 hover:bg-blue-600 text-white px-2 py-1.5 rounded text-xs transition-colors duration-200"
+                              >
+                                Add Once
+                              </button>
+                              <button
+                                onClick={() => handleAddSong(song)}
+                                className="bg-green-600 hover:bg-green-700 text-white px-2 py-1.5 rounded text-xs transition-colors duration-200"
+                              >
+                                Add Song
+                              </button>
+                            </div>
                           </div>
                         </div>
                       </div>

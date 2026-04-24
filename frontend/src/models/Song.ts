@@ -8,4 +8,5 @@ export interface Song {
   releaseDate: string;
   popularity: number;
   userId: string;
+  skipHistory?: boolean;
 }
