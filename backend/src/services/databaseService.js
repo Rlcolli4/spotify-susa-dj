@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
+const { getArizonaDateString } = require('../utils/arizonaTime');
 
 class DatabaseService {
   constructor() {
@@ -54,15 +55,23 @@ class DatabaseService {
           album_name VARCHAR(100),
           user_id text NOT NULL,
           added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          last_played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           times_played INTEGER NOT NULL DEFAULT 1,
           banned BOOLEAN NOT NULL DEFAULT FALSE
         )
+      `);
+
+      await client.query(`
+        ALTER TABLE track_history
+          ADD COLUMN IF NOT EXISTS last_played_at TIMESTAMP,
+          DROP COLUMN IF EXISTS last_played_on_az;
       `);
 
       // Create indexes for better performance
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_playback_history_user_id ON track_history(user_id);
         CREATE INDEX IF NOT EXISTS idx_playback_history_track_id ON track_history(track_id);
+        CREATE INDEX IF NOT EXISTS idx_track_history_autoplay_daily ON track_history(banned, last_played_at);
       `);
 
       // Create playback_queue && playback_status table, set default status of stop, clear queue
@@ -126,7 +135,6 @@ class DatabaseService {
         albumName,
         userId
       } = playbackData;
-
       const checkQuery = `
         SELECT id FROM track_history
         WHERE track_id = $1
@@ -138,8 +146,10 @@ class DatabaseService {
         // If entry exists, update the times_played count
         const updateQuery = `
           UPDATE track_history
-          SET times_played = times_played + 1
+          SET times_played = times_played + 1,
+              last_played_at = now()
           WHERE id = $1
+          RETURNING id
         `;
         const result = await this.pool.query(updateQuery, [existingCheck.rows[0].id]);
         logger.info(`Playback event updated: ${trackName} by ${artistName}`);
@@ -148,8 +158,8 @@ class DatabaseService {
       else {
         const query = `
           INSERT INTO track_history
-          (track_id, track_name, artist_name, album_name, user_id) 
-          VALUES ($1, $2, $3, $4, $5)
+          (track_id, track_name, artist_name, album_name, user_id, last_played_at) 
+          VALUES ($1, $2, $3, $4, $5, now())
           RETURNING id
         `;
 
@@ -263,6 +273,47 @@ class DatabaseService {
     }
     catch (error) {
       logger.error('Failed to get random tracks:', error);
+      throw error;
+    }
+  }
+
+  async getAutoplayTracks(limit = 1, playedOnArizonaDate = getArizonaDateString()) {
+    try {
+      const unplayedTodayQuery = `
+        SELECT
+          ph.track_id as trackId,
+          ph.track_name as trackName,
+          ph.artist_name as artistName,
+          ph.album_name as albumName,
+          ph.user_id as userId
+        FROM track_history ph
+        WHERE banned = false
+          AND (last_played_at IS NULL OR last_played_at::date < $2::date)
+        ORDER BY RANDOM()
+        LIMIT $1
+      `;
+      const unplayedTodayResult = await this.pool.query(unplayedTodayQuery, [limit, playedOnArizonaDate]);
+      if (unplayedTodayResult.rows.length > 0) {
+        return unplayedTodayResult.rows;
+      }
+
+      const fallbackQuery = `
+        SELECT
+          ph.track_id as trackId,
+          ph.track_name as trackName,
+          ph.artist_name as artistName,
+          ph.album_name as albumName,
+          ph.user_id as userId
+        FROM track_history ph
+        WHERE banned = false
+        ORDER BY RANDOM()
+        LIMIT $1
+      `;
+      const fallbackResult = await this.pool.query(fallbackQuery, [limit]);
+      return fallbackResult.rows;
+    }
+    catch (error) {
+      logger.error('Failed to get autoplay tracks:', error);
       throw error;
     }
   }
@@ -387,6 +438,22 @@ class DatabaseService {
     }
     catch (error) {
       logger.error('Failed to getPlaybackStatus', error);
+      throw error;
+    }
+  }
+
+  async getPlaybackStatusRecord() {
+    try {
+      const query = `
+        SELECT status, user_id, date_updated
+        FROM public.playback_status
+        LIMIT 1
+      `;
+      const result = await this.pool.query(query);
+      return result.rows[0];
+    }
+    catch (error) {
+      logger.error('Failed to getPlaybackStatusRecord', error);
       throw error;
     }
   }

@@ -37,6 +37,8 @@ describe('databaseService baseline behavior', () => {
       expect.stringContaining('SET times_played = times_played + 1'),
       [42]
     );
+    expect(databaseService.pool.query.mock.calls[1][0]).toContain('last_played_at = now()');
+    expect(databaseService.pool.query.mock.calls[1][0]).not.toContain('last_played_on_az');
   });
 
   test('logPlaybackEvent inserts a new track when no history row exists', async () => {
@@ -58,6 +60,8 @@ describe('databaseService baseline behavior', () => {
       expect.stringContaining('INSERT INTO track_history'),
       ['track-2', 'New Song', 'New Artist', 'New Album', 'new-user']
     );
+    expect(databaseService.pool.query.mock.calls[1][0]).toContain('last_played_at');
+    expect(databaseService.pool.query.mock.calls[1][0]).not.toContain('last_played_on_az');
   });
 
   test('getRandomTracks returns unbanned random tracks with requested limit', async () => {
@@ -71,6 +75,31 @@ describe('databaseService baseline behavior', () => {
       [3]
     );
     expect(databaseService.pool.query.mock.calls[0][0]).toContain('ORDER BY RANDOM()');
+  });
+
+  test('getAutoplayTracks prefers tracks not played on the current Arizona date', async () => {
+    const rows = [{ trackid: 'track-1' }];
+    databaseService.pool.query.mockResolvedValue({ rows });
+
+    await expect(databaseService.getAutoplayTracks(1, '2026-04-24')).resolves.toBe(rows);
+
+    expect(databaseService.pool.query).toHaveBeenCalledTimes(1);
+    expect(databaseService.pool.query.mock.calls[0][0]).toContain('last_played_at IS NULL OR last_played_at::date < $2::date');
+    expect(databaseService.pool.query.mock.calls[0][1]).toEqual([1, '2026-04-24']);
+  });
+
+  test('getAutoplayTracks falls back to all unbanned tracks when every song was played today', async () => {
+    const fallbackRows = [{ trackid: 'track-2' }];
+    databaseService.pool.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: fallbackRows });
+
+    await expect(databaseService.getAutoplayTracks(1, '2026-04-24')).resolves.toBe(fallbackRows);
+
+    expect(databaseService.pool.query).toHaveBeenCalledTimes(2);
+    expect(databaseService.pool.query.mock.calls[1][0]).toContain('WHERE banned = false');
+    expect(databaseService.pool.query.mock.calls[1][0]).toContain('ORDER BY RANDOM()');
+    expect(databaseService.pool.query.mock.calls[1][1]).toEqual([1]);
   });
 
   test('getUserForTrack returns the first matching user', async () => {
@@ -121,17 +150,43 @@ describe('databaseService baseline behavior', () => {
   test('status and DJ user helpers map database rows to app values', async () => {
     databaseService.pool.query
       .mockResolvedValueOnce({ rows: [{ status: 'autoplay' }] })
+      .mockResolvedValueOnce({ rows: [{ status: 'autoplay', user_id: 'alice', date_updated: '2026-04-24T16:00:00.000Z' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ user_name: 'Alice', user_id: 'u1' }] });
 
     await expect(databaseService.getPlaybackStatus()).resolves.toBe('autoplay');
+    await expect(databaseService.getPlaybackStatusRecord()).resolves.toEqual({
+      status: 'autoplay',
+      user_id: 'alice',
+      date_updated: '2026-04-24T16:00:00.000Z'
+    });
     await databaseService.updatePlaybackStatus('play', 'alice');
     await expect(databaseService.getDjUserByCode('1234')).resolves.toEqual({ id: 'u1', username: 'Alice' });
 
-    expect(databaseService.pool.query.mock.calls[1]).toEqual([
+    expect(databaseService.pool.query.mock.calls[2]).toEqual([
       expect.stringContaining('UPDATE public.playback_status'),
       ['play', 'alice']
     ]);
+  });
+
+  test('createTables adds autoplay play timestamp column and supporting index', async () => {
+    const client = {
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+      release: jest.fn()
+    };
+    databaseService.pool = {
+      connect: jest.fn().mockResolvedValue(client)
+    };
+
+    await databaseService.createTables();
+
+    const allSql = client.query.mock.calls.map(call => call[0]).join('\n');
+    expect(allSql).toContain('last_played_at TIMESTAMP');
+    expect(allSql).toContain('ADD COLUMN IF NOT EXISTS last_played_at TIMESTAMP');
+    expect(allSql).toContain('DROP COLUMN IF EXISTS last_played_on_az');
+    expect(allSql).toContain('idx_track_history_autoplay_daily');
+    expect(allSql).toContain('track_history(banned, last_played_at)');
+    expect(client.release).toHaveBeenCalled();
   });
 
   test('healthCheck returns unhealthy response instead of throwing', async () => {

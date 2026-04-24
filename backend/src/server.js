@@ -7,6 +7,8 @@ require('dotenv').config();
 const logger = require('./utils/logger');
 const spotifyService = require('./services/spotifyService');
 const databaseService = require('./services/databaseService');
+const { enforceAutoplaySchedule, runAutoplayTick } = require('./services/autoplayService');
+const { isArizonaQuietHours } = require('./utils/arizonaTime');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -137,6 +139,10 @@ app.post('/api/status', async (req, res) => {
       return res.status(400).json({ error: 'Invalid status value' });
     }
 
+    if (status === 'autoplay' && isArizonaQuietHours()) {
+      return res.status(400).json({ error: 'Autoplay is unavailable from midnight to 7:00 AM Arizona time' });
+    }
+
     await databaseService.updatePlaybackStatus(status, userId || 'system');
     queueStatus = status;
     res.json({ status: queueStatus });
@@ -178,58 +184,18 @@ async function startServer() {
 
 
       setInterval(async () => {
-        if (spotifyService.isTokenValid()) {
-          try {
-            const trackQueue = await databaseService.getCurrentPlaybackQueue();
-            queueStatus = await databaseService.getPlaybackStatus();
-            const spotifyPlayback = await spotifyService.getCurrentPlayback();
-
-            spotifyStatus = {
-              isPlaying: spotifyPlayback.is_playing || false,
-              item: spotifyPlayback.item || null,
-              progressMs: spotifyPlayback.progress_ms || 0
-            };
-
-            if (queueStatus === 'autoplay' && trackQueue.length === 0 && !spotifyStatus.isPlaying) {
-              //add random track to queue
-              const randomTracks = await databaseService.getRandomTracks(1);
-              if (randomTracks.length > 0) {
-                const track = randomTracks[0];
-                //await databaseService.addToPlaybackQueue(track.trackId, track.trackName, track.artistName, track.albumName, 'autoplay');
-                await playTrack(track.trackid);
-                await databaseService.logPlaybackEvent({
-                  trackId: track.trackid,
-                  trackName: track.trackname,
-                  artistName: track.artistname,
-                  albumName: track.albumname,
-                  userId: track.userid
-                });
-                logger.info(`Added random track to queue: ${track.trackname} by ${track.artistname}`);
-              }
-            }
-            //if autoplay or playing, and not currently playing, play next track
-            if ((queueStatus === 'autoplay' || queueStatus === 'play') && trackQueue.length > 0 && !spotifyStatus.isPlaying) {
-              const nextTrack = trackQueue[0];
-              await playTrack(nextTrack.trackid);
-              await databaseService.logPlaybackEvent({
-                trackId: nextTrack.trackid,
-                trackName: nextTrack.trackname,
-                artistName: nextTrack.artistname,
-                albumName: nextTrack.albumname,
-                userId: nextTrack.userid
-              });
-              logger.info(`Now playing: ${nextTrack.trackname} by ${nextTrack.artistname}`);
-              //remove from queue
-              await databaseService.removeFromPlaybackQueue(nextTrack.trackid);
-              activeQueue = await databaseService.getCurrentPlaybackQueue();
-            }
-            else {
-              activeQueue = trackQueue;
-            }
-
-          } catch (error) {
-            logger.error('Failed to get current playback:', error);
+        try {
+          if (!spotifyService.isTokenValid()) {
+            queueStatus = await enforceAutoplaySchedule(databaseService);
+            return;
           }
+
+          const tickState = await runAutoplayTick({ databaseService, spotifyService, playTrack });
+          activeQueue = tickState.activeQueue;
+          queueStatus = tickState.queueStatus;
+          spotifyStatus = tickState.spotifyStatus;
+        } catch (error) {
+          logger.error('Failed to get current playback:', error);
         }
       }, 10000);
     });
@@ -243,7 +209,7 @@ async function startServer() {
 async function playTrack(trackId) {
   try {
     const trackUri = `spotify:track:${trackId}`;
-    const result = await spotifyService.play([trackUri]);
+    await spotifyService.play([trackUri]);
   } catch (error) {
     logger.error('Failed to play track:', error);
   }
